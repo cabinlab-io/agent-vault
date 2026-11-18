@@ -34,12 +34,6 @@ Features:
 
 By default, requests not matching any service forward as plain proxy traffic; flip a vault into strict deny mode (`unmatched_host_policy=deny`) to reject them with 403 instead.
 
-## Agent Vault (open source) and Infisical Agent Vault
-
-**[Infisical Agent Vault](https://infisical.com/docs/documentation/platform/agent-vault/overview)** is the way to broker credentials to agents, for every use case from personal projects to enterprise deployments. It is built into the Infisical platform: services are grouped into access bundles, agents reach them through time-bound sessions, and permissions are governed by Infisical's access controls.
-
-**Agent Vault** (this project) is the original standalone, open-source binary. It is no longer recommended for new setups. If you are starting fresh, use Infisical Agent Vault instead.
-
 ## Use Cases
 
 Agent Vault works with all kinds of AI Agent use-cases including secure remote coding agents, all-purpose agents, custom agents + harnesses, secure ephemeral sandboxes and more.
