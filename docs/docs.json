@@ -21,11 +21,6 @@
       "dark": "#0B0C0E"
     }
   },
-  "integrations": {
-    "ga4": {
-      "measurementId": "G-MKYN2VSJTE"
-    }
-  },
   "navigation": {
     "groups": [
       {
