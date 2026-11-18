@@ -38,8 +38,6 @@ Features:
 
 By default, requests not matching any service forward as plain proxy traffic; flip a vault into strict deny mode (`unmatched_host_policy=deny`) to reject them with 403 instead.
 
-Read the full backstory behind Agent Vault [here](https://infisical.com/blog/agent-vault-the-open-source-credential-proxy-and-vault-for-agents).
-
 ## Agent Vault (open source) and Infisical Agent Vault
 
 **[Infisical Agent Vault](https://infisical.com/docs/documentation/platform/agent-vault/overview)** is the way to broker credentials to agents, for every use case from personal projects to enterprise deployments. It is built into the Infisical platform: services are grouped into access bundles, agents reach them through time-bound sessions, and permissions are governed by Infisical's access controls.
@@ -238,29 +236,3 @@ make web-dev    # Vite dev server with hot reload (port 5173)
 make dev        # Go + Vite dev servers with hot reload
 make docker     # Build Docker image
 ```
-
-## Open-source vs. paid
-
-This repo available under the [MIT expat license](https://github.com/Infisical/infisical/blob/main/LICENSE), with the exception of the `ee` directory which will contain premium enterprise features requiring a Infisical license.
-
-If you are interested in Infisical or exploring a more commercial path for Agent Vault, take a look at [our website](https://infisical.com/) or [book a meeting with us](https://infisical.cal.com/vlad/infisical-demo).
-
-## Contributing
-
-Whether it's big or small, we love contributions. Agent Vault follows the same contribution guidelines as Infisical.
-
-Check out our guide to see how to [get started](https://infisical.com/docs/contributing/getting-started).
-
-Not sure where to get started? You can:
-
-- Join our <a href="https://infisical.com/slack">Slack</a>, and ask us any questions there.
-
-## We are hiring!
-
-If you're reading this, there is a strong chance you like the products we created.
-
-You might also make a great addition to our team. We're growing fast and would love for you to [join us](https://infisical.com/careers).
-
----
-
-> **Use Agent Vault in Infisical.** This open-source project is no longer the recommended way to run Agent Vault. See the [Infisical Agent Vault documentation](https://infisical.com/docs/documentation/platform/agent-vault/overview) to get started.
