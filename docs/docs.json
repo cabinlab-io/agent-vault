@@ -96,8 +96,7 @@
     "socials": {
       "x": "https://www.twitter.com/infisical/",
       "linkedin": "https://www.linkedin.com/company/infisical/",
-      "github": "https://github.com/Infisical/infisical-cli",
-      "slack": "https://infisical.com/slack"
+      "github": "https://github.com/Infisical/infisical-cli"
     },
     "links": [
       {
@@ -257,10 +256,6 @@
           {
             "label": "Sales",
             "href": "mailto:sales@infisical.com"
-          },
-          {
-            "label": "Support",
-            "href": "https://infisical.com/slack"
           }
         ]
       }
