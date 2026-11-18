@@ -10,7 +10,7 @@ Agents should not possess credentials. Agent Vault eliminates credential exfiltr
 </p>
 
 <p align="center">
-<a href="docs/index.mdx">Documentation</a> | <a href="docs/installation.mdx">Installation</a> | <a href="docs/tutorial.mdx">Tutorial</a> | <a href="https://youtu.be/AkyMmDSX8b4">Video Demo</a> | <a href="https://infisical.com/slack">Slack</a>
+<a href="docs/index.mdx">Documentation</a> | <a href="docs/installation.mdx">Installation</a> | <a href="docs/tutorial.mdx">Tutorial</a> | <a href="https://youtu.be/AkyMmDSX8b4">Video Demo</a>
 </p>
 
 <p align="center">
@@ -77,10 +77,12 @@ Agent Vault is both a vault and proxy service and ships as a single binary that 
 
 You can configure Agent Vault to broker credentials for an AI agents in just a few steps:
 
-1. [Install](docs/installation.mdx) and start an Agent Vault server. You can run the script below to Install Agent Vault, supporting macOS (Intel + Apple Silicon) and Linux (x86_64 + ARM64):
+1. Build and start an Agent Vault server. Building from source needs Go and Node.js, and produces a single `agent-vault` binary:
 
 ```bash
-curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL https://get.agent-vault.dev | sh
+git clone https://github.com/cabinlab-io/agent-vault.git
+cd agent-vault
+make build
 ```
 
 Start the Agent Vault server and set a master password for it (store it somewhere safe); the password is used as part of its [data encryption mechanism](docs/learn/security.mdx) and is unset from the process after the initial read.
@@ -90,12 +92,13 @@ export AGENT_VAULT_MASTER_PASSWORD=your-password
 agent-vault server -d
 ```
 
-You can also deploy Agent Vault with Docker:
+You can also build a Docker image and deploy Agent Vault with it:
 
 ```bash
+docker build -t agent-vault .
 docker run -it -p 14321:14321 -p 14322:14322 \
   -e AGENT_VAULT_MASTER_PASSWORD=your-password \
-  -v agent-vault-data:/data infisical/agent-vault
+  -v agent-vault-data:/data agent-vault
 ```
 
 The server starts the HTTP API on port `14321` and a transparent HTTP/HTTPS proxy on port `14322`; the same listener handles `CONNECT` for `https://` upstreams and absolute-form forward-proxy requests for `http://` upstreams.
@@ -116,21 +119,7 @@ AGENT_VAULT_VAULT=<vault-in-agent-vault>
 ANTHROPIC_API_KEY=__anthropic_api_key__ // dummy key that will be substituted by Agent Vault
 ```
 
-5. [Install](docs/installation.mdx) the Agent Vault CLI into your agent's environment and run the Agent Vault CLI with your agent to start proxying requests through Agent Vault.
-
-```bash
-curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL https://get.agent-vault.dev | sh
-```
-
-### Verifying downloaded release binaries
-
-Release archives published from this workflow ship with a build provenance attestation tied to the GitHub Actions run that produced them. Verify with the `gh` CLI (no extra tools, no key management):
-
-```bash
-gh attestation verify agent-vault_*.tar.gz --repo Infisical/agent-vault
-```
-
-`checksums.txt` is also covered by the same attestation, and its cosign signature continues to verify with `cosign verify-blob` for users who prefer that path.
+5. Copy the `agent-vault` binary you built into your agent's environment and run the Agent Vault CLI with your agent to start proxying requests through Agent Vault.
 
 ```bash
 agent-vault run -- claude
@@ -143,7 +132,8 @@ Alternatively, if your agent is running with Docker, you can install the Agent V
 
 ```dockerfile
 # Add this line to your existing Dockerfile alongside your agent or app setup.
-COPY --from=infisical/agent-vault:latest /usr/local/bin/agent-vault /usr/local/bin/agent-vault
+# Build the agent-vault image first (see step 1).
+COPY --from=agent-vault /usr/local/bin/agent-vault /usr/local/bin/agent-vault
 
 ...
 
@@ -185,9 +175,7 @@ Migrate existing data with `agent-vault migrate-db --to postgres://...` before s
 
 Agent Vault offers a TypeScript SDK in the event you'd like an orchestrator to mint a short-lived token and pass proxy config into a sandboxed agent to have it proxy requests through Agent Vault that way.
 
-```bash
-npm install @infisical/agent-vault-sdk
-```
+Build it from [`sdks/sdk-typescript`](sdks/sdk-typescript) in this repository.
 
 ```typescript
 import { AgentVault, buildProxyEnv } from "@infisical/agent-vault-sdk";
