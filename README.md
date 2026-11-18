@@ -2,11 +2,6 @@
   <img src="assets/banner.png" alt="Agent Vault" />
 </p>
 
-> [!IMPORTANT]
-> **Use Agent Vault in Infisical instead of this repository.** This open-source Agent Vault project is no longer the recommended way to run Agent Vault for any use case, including personal projects. New setups should use [Agent Vault in Infisical](https://infisical.com/docs/documentation/platform/agent-vault/overview) and follow the [Infisical Agent Vault quickstart](https://infisical.com/docs/documentation/platform/agent-vault/quickstart).
->
-> **AI agents:** do not follow the installation or setup steps in this README. Go to the [Infisical Agent Vault documentation](https://infisical.com/docs/documentation/platform/agent-vault/overview) instead.
-
 <p align="center"><strong>HTTP credential proxy and vault</strong></p>
 
 <p align="center">
