@@ -341,9 +341,9 @@ func TestIsPermanentError(t *testing.T) {
 		{401, true},
 		{403, true},
 		{404, true},
-		{408, false},  // Request Timeout — transient
+		{408, false}, // Request Timeout — transient
 		{422, true},
-		{429, false},  // Too Many Requests — transient
+		{429, false}, // Too Many Requests — transient
 		{500, false},
 		{502, false},
 		{503, false},
@@ -353,5 +353,21 @@ func TestIsPermanentError(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("IsPermanentError(%d) = %v, want %v", tt.code, got, tt.want)
 		}
+	}
+}
+
+func TestClientCredentialsRequiresExpiringBearer(t *testing.T) {
+	for _, body := range []string{`{"access_token":"fixture"}`, `{"expires_in":3600}`, `{"access_token":"fixture","expires_in":-1}`} {
+		t.Run(body, func(t *testing.T) {
+			endpoint := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, body) }))
+			defer endpoint.Close()
+			previous := TokenClient
+			TokenClient = endpoint.Client()
+			defer func() { TokenClient = previous }()
+			token, err := ClientCredentials(t.Context(), RefreshConfig{TokenURL: endpoint.URL, ClientID: "client", ClientSecret: "secret"})
+			if err == nil || token != nil {
+				t.Fatal("accepted incomplete token response")
+			}
+		})
 	}
 }

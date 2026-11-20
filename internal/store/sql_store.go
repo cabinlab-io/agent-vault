@@ -939,17 +939,17 @@ func (s *SQLStore) GetCredentialOAuth(ctx context.Context, vaultID, key string) 
 	err := s.db.QueryRowContext(ctx,
 		s.dialect.Rebind(`SELECT vault_id, credential_key, authorization_url, token_url, client_id,
 		   client_secret_ct, client_secret_nonce, scopes, scope_separator, disable_pkce,
-		   token_auth_method, refresh_token_ct, refresh_token_nonce, token_expires_at,
+		   grant_type, token_auth_method, refresh_token_ct, refresh_token_nonce, token_expires_at,
 		   connected_at, last_refreshed_at, last_refresh_error, last_refresh_error_at,
-		   created_at, updated_at
+		   created_at, updated_at, (SELECT nonce FROM credentials WHERE credentials.vault_id = credential_oauth.vault_id AND credentials.key = credential_oauth.credential_key)
 		 FROM credential_oauth WHERE vault_id = ? AND credential_key = ?`),
 		vaultID, key,
 	).Scan(
 		&co.VaultID, &co.CredentialKey, &authURL, &co.TokenURL, &co.ClientID,
 		&co.ClientSecretCT, &co.ClientSecretNonce, &scopes, &scopeSep, &disablePKCERaw,
-		&tokenAuthMethod, &co.RefreshTokenCT, &co.RefreshTokenNonce, &tokenExpiresAt,
+		&co.GrantType, &tokenAuthMethod, &co.RefreshTokenCT, &co.RefreshTokenNonce, &tokenExpiresAt,
 		&connectedAt, &lastRefreshedAt, &lastRefreshError, &lastRefreshErrorAt,
-		&createdAt, &updatedAt,
+		&createdAt, &updatedAt, &co.AccessNonce,
 	)
 	if err != nil {
 		return nil, err
@@ -976,27 +976,38 @@ func (s *SQLStore) GetCredentialOAuth(ctx context.Context, vaultID, key string) 
 	return &co, nil
 }
 
-func (s *SQLStore) SetCredentialOAuth(ctx context.Context, co *CredentialOAuth) error {
+func (s *SQLStore) SetCredentialOAuth(ctx context.Context, co *CredentialOAuth, initialToken *EncryptedKV) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// Store the first access token and its provider configuration atomically.
+	var ciphertext, nonce = []byte{}, []byte{}
+	if initialToken != nil {
+		ciphertext, nonce = initialToken.Ciphertext, initialToken.Nonce
+	}
 	// Ensure parent credentials row exists with type='oauth'.
 	_, err = tx.ExecContext(ctx,
 		s.dialect.Rebind(`INSERT INTO credentials (id, vault_id, key, type, ciphertext, nonce, created_at, updated_at)
 		 VALUES (?, ?, ?, 'oauth', ?, ?, ?, ?)
 		 ON CONFLICT(vault_id, key) DO UPDATE SET
 		   type = 'oauth',
+           ciphertext = CASE WHEN ? OR EXISTS (SELECT 1 FROM credential_oauth WHERE vault_id = excluded.vault_id AND credential_key = excluded.key AND grant_type = 'client_credentials') THEN excluded.ciphertext ELSE credentials.ciphertext END,
+           nonce = CASE WHEN ? OR EXISTS (SELECT 1 FROM credential_oauth WHERE vault_id = excluded.vault_id AND credential_key = excluded.key AND grant_type = 'client_credentials') THEN excluded.nonce ELSE credentials.nonce END,
 		   updated_at = excluded.updated_at`),
-		newUUID(), co.VaultID, co.CredentialKey, []byte{}, []byte{}, s.now(), s.now(),
+		newUUID(), co.VaultID, co.CredentialKey, ciphertext, nonce, s.now(), s.now(), initialToken != nil, initialToken != nil,
 	)
 	if err != nil {
 		return fmt.Errorf("ensuring credential row: %w", err)
 	}
 
 	nowStr := s.now()
+	grantType := co.GrantType
+	if grantType == "" {
+		grantType = "authorization_code"
+	}
 	disablePKCE := s.dialect.BoolVal(co.DisablePKCE)
 	tokenAuthMethod := co.TokenAuthMethod
 	if tokenAuthMethod == "" {
@@ -1014,11 +1025,11 @@ func (s *SQLStore) SetCredentialOAuth(ctx context.Context, co *CredentialOAuth) 
 
 	_, err = tx.ExecContext(ctx,
 		s.dialect.Rebind(`INSERT INTO credential_oauth (vault_id, credential_key, authorization_url, token_url, client_id,
-		   client_secret_ct, client_secret_nonce, scopes, scope_separator, disable_pkce, token_auth_method,
+		   client_secret_ct, client_secret_nonce, scopes, scope_separator, disable_pkce, grant_type, token_auth_method,
 		   refresh_token_ct, refresh_token_nonce, token_expires_at,
 		   connected_at, last_refreshed_at, last_refresh_error, last_refresh_error_at,
 		   created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(vault_id, credential_key) DO UPDATE SET
 		   authorization_url = excluded.authorization_url,
 		   token_url = excluded.token_url,
@@ -1028,27 +1039,28 @@ func (s *SQLStore) SetCredentialOAuth(ctx context.Context, co *CredentialOAuth) 
 		   scopes = excluded.scopes,
 		   scope_separator = excluded.scope_separator,
 		   disable_pkce = excluded.disable_pkce,
-		   token_auth_method = excluded.token_auth_method,
-		   refresh_token_ct = CASE WHEN excluded.token_url = credential_oauth.token_url
+		   grant_type = excluded.grant_type,
+           token_auth_method = excluded.token_auth_method,
+		   refresh_token_ct = CASE WHEN excluded.token_url = credential_oauth.token_url AND excluded.grant_type = credential_oauth.grant_type
 		     THEN COALESCE(excluded.refresh_token_ct, credential_oauth.refresh_token_ct)
 		     ELSE excluded.refresh_token_ct END,
-		   refresh_token_nonce = CASE WHEN excluded.token_url = credential_oauth.token_url
+		   refresh_token_nonce = CASE WHEN excluded.token_url = credential_oauth.token_url AND excluded.grant_type = credential_oauth.grant_type
 		     THEN COALESCE(excluded.refresh_token_nonce, credential_oauth.refresh_token_nonce)
 		     ELSE excluded.refresh_token_nonce END,
-		   token_expires_at = CASE WHEN excluded.token_url = credential_oauth.token_url
+		   token_expires_at = CASE WHEN excluded.token_url = credential_oauth.token_url AND excluded.grant_type = credential_oauth.grant_type
 		     THEN COALESCE(excluded.token_expires_at, credential_oauth.token_expires_at)
 		     ELSE excluded.token_expires_at END,
-		   connected_at = CASE WHEN excluded.token_url = credential_oauth.token_url
+		   connected_at = CASE WHEN excluded.token_url = credential_oauth.token_url AND excluded.grant_type = credential_oauth.grant_type
 		     THEN COALESCE(excluded.connected_at, credential_oauth.connected_at)
 		     ELSE excluded.connected_at END,
-		   last_refreshed_at = CASE WHEN excluded.token_url = credential_oauth.token_url
+		   last_refreshed_at = CASE WHEN excluded.token_url = credential_oauth.token_url AND excluded.grant_type = credential_oauth.grant_type
 		     THEN COALESCE(excluded.last_refreshed_at, credential_oauth.last_refreshed_at)
 		     ELSE excluded.last_refreshed_at END,
 		   last_refresh_error = excluded.last_refresh_error,
 		   last_refresh_error_at = excluded.last_refresh_error_at,
 		   updated_at = excluded.updated_at`),
 		co.VaultID, co.CredentialKey, nullableString(co.AuthorizationURL), co.TokenURL, co.ClientID,
-		co.ClientSecretCT, co.ClientSecretNonce, nullableString(co.Scopes), scopeSep, disablePKCE, tokenAuthMethod,
+		co.ClientSecretCT, co.ClientSecretNonce, nullableString(co.Scopes), scopeSep, disablePKCE, grantType, tokenAuthMethod,
 		co.RefreshTokenCT, co.RefreshTokenNonce, tokenExpiresAt,
 		connectedAt, lastRefreshedAt, nullableString(co.LastRefreshError), lastRefreshErrorAt,
 		nowStr, nowStr,
@@ -1059,7 +1071,7 @@ func (s *SQLStore) SetCredentialOAuth(ctx context.Context, co *CredentialOAuth) 
 	return tx.Commit()
 }
 
-func (s *SQLStore) UpdateCredentialOAuthTokens(ctx context.Context, vaultID, key string, accessCT, accessNonce, refreshCT, refreshNonce []byte, expiresAt *time.Time) error {
+func (s *SQLStore) UpdateCredentialOAuthTokens(ctx context.Context, vaultID, key string, accessCT, accessNonce, refreshCT, refreshNonce []byte, expiresAt *time.Time, expectedNonce []byte) error {
 	nowStr := s.now()
 
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -1068,14 +1080,28 @@ func (s *SQLStore) UpdateCredentialOAuthTokens(ctx context.Context, vaultID, key
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	// Update the access token in the credentials table.
-	_, err = tx.ExecContext(ctx,
-		s.dialect.Rebind(`UPDATE credentials SET ciphertext = ?, nonce = ?, updated_at = ?
-		 WHERE vault_id = ? AND key = ?`),
-		accessCT, accessNonce, nowStr, vaultID, key,
-	)
+	// A late refresh must not overwrite a token installed by a concurrent
+	// exchange or reconfiguration. Legacy uploads have no expected nonce and
+	// can only update authorization-code credentials.
+	query := `UPDATE credentials SET ciphertext = ?, nonce = ?, updated_at = ?
+ WHERE vault_id = ? AND key = ?`
+	args := []any{accessCT, accessNonce, nowStr, vaultID, key}
+	if expectedNonce != nil {
+		query += " AND nonce = ?"
+		args = append(args, expectedNonce)
+	} else {
+		query += ` AND EXISTS (SELECT 1 FROM credential_oauth WHERE vault_id = credentials.vault_id AND credential_key = credentials.key AND grant_type = 'authorization_code')`
+	}
+	result, err := tx.ExecContext(ctx, s.dialect.Rebind(query), args...)
 	if err != nil {
 		return fmt.Errorf("updating access token: %w", err)
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if updated != 1 {
+		return fmt.Errorf("OAuth credential changed during exchange")
 	}
 
 	// Update refresh state in the companion table.
@@ -2225,7 +2251,7 @@ func (s *SQLStore) ApplyProposal(ctx context.Context, vaultID string, proposalID
 		if scopeSep == "" {
 			scopeSep = " "
 		}
-		_, err = tx.ExecContext(ctx,
+		result, err := tx.ExecContext(ctx,
 			s.dialect.Rebind(`INSERT INTO credential_oauth (vault_id, credential_key, authorization_url, token_url, client_id,
 			   client_secret_ct, client_secret_nonce, scopes, scope_separator, disable_pkce, token_auth_method,
 			   created_at, updated_at)
@@ -2252,13 +2278,20 @@ func (s *SQLStore) ApplyProposal(ctx context.Context, vaultID string, proposalID
 			     THEN credential_oauth.token_expires_at ELSE NULL END,
 			   connected_at = CASE WHEN excluded.token_url = credential_oauth.token_url
 			     THEN credential_oauth.connected_at ELSE NULL END,
-			   updated_at = excluded.updated_at`),
+			   updated_at = excluded.updated_at WHERE credential_oauth.grant_type = 'authorization_code'`),
 			vaultID, oc.Key, nullableString(oc.AuthorizationURL), oc.TokenURL, oc.ClientID,
 			oc.ClientSecretCT, oc.ClientSecretNonce, nullableString(oc.Scopes), scopeSep, disablePKCE, tokenAuthMethod,
 			nowStr, nowStr,
 		)
 		if err != nil {
 			return fmt.Errorf("upserting credential_oauth %q: %w", oc.Key, err)
+		}
+		updated, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if updated == 0 {
+			return fmt.Errorf("use OAuth connect to update client credentials %q", oc.Key)
 		}
 	}
 

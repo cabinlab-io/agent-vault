@@ -1,6 +1,7 @@
 package brokercore
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -77,7 +78,7 @@ type CredentialStore interface {
 // Passed separately to StoreCredentialProvider to keep CredentialStore minimal.
 type OAuthStore interface {
 	GetCredentialOAuth(ctx context.Context, vaultID, key string) (*store.CredentialOAuth, error)
-	UpdateCredentialOAuthTokens(ctx context.Context, vaultID, key string, accessCT, accessNonce, refreshCT, refreshNonce []byte, expiresAt *time.Time) error
+	UpdateCredentialOAuthTokens(ctx context.Context, vaultID, key string, accessCT, accessNonce, refreshCT, refreshNonce []byte, expiresAt *time.Time, expectedNonce []byte) error
 	UpdateCredentialOAuthError(ctx context.Context, vaultID, key string, errMsg string) error
 }
 
@@ -197,7 +198,7 @@ func (p *StoreCredentialProvider) Inject(ctx context.Context, vaultID, targetHos
 		}
 
 		if cred.Type == "oauth" && p.Refresher != nil && p.OAuthStore != nil {
-			s, err = p.maybeRefreshOAuth(ctx, vaultID, key, s)
+			s, err = p.maybeRefreshOAuth(ctx, vaultID, key, s, cred.Nonce)
 			if err != nil {
 				return "", err
 			}
@@ -254,12 +255,15 @@ func (p *StoreCredentialProvider) Inject(ctx context.Context, vaultID, targetHos
 
 const oauthRefreshBuffer = 5 * time.Minute
 
-func (p *StoreCredentialProvider) maybeRefreshOAuth(ctx context.Context, vaultID, key, currentToken string) (string, error) {
+func (p *StoreCredentialProvider) maybeRefreshOAuth(ctx context.Context, vaultID, key, currentToken string, currentNonce []byte) (string, error) {
 	oauthCfg, err := p.OAuthStore.GetCredentialOAuth(ctx, vaultID, key)
 	if err != nil {
-		return currentToken, nil
+		return "", fmt.Errorf("%w: load OAuth configuration: %v", ErrOAuthRefreshFailed, err)
 	}
 
+	if oauthCfg.GrantType == oauth.ClientCredentialsGrant && (!bytes.Equal(currentNonce, oauthCfg.AccessNonce) || oauthCfg.TokenExpiresAt == nil) {
+		return "", fmt.Errorf("%w: missing or changed OAuth token expiry", ErrOAuthRefreshFailed)
+	}
 	if oauthCfg.TokenExpiresAt == nil {
 		return currentToken, nil
 	}
@@ -267,17 +271,12 @@ func (p *StoreCredentialProvider) maybeRefreshOAuth(ctx context.Context, vaultID
 		return currentToken, nil
 	}
 
-	if len(oauthCfg.RefreshTokenCT) == 0 {
+	if oauthCfg.GrantType != oauth.ClientCredentialsGrant && len(oauthCfg.RefreshTokenCT) == 0 {
 		return currentToken, nil
 	}
 
-	sfKey := vaultID + "|" + key
+	sfKey := vaultID + "|" + key + "|" + string(currentNonce)
 	result := p.Refresher.Do(sfKey, func() oauth.RefreshResult {
-		refreshToken, err := crypto.Decrypt(oauthCfg.RefreshTokenCT, oauthCfg.RefreshTokenNonce, p.EncKey)
-		if err != nil {
-			return oauth.RefreshResult{Err: fmt.Errorf("%w: decrypt refresh token: %v", ErrOAuthRefreshFailed, err)}
-		}
-
 		var clientSecret string
 		if len(oauthCfg.ClientSecretCT) > 0 {
 			cs, err := crypto.Decrypt(oauthCfg.ClientSecretCT, oauthCfg.ClientSecretNonce, p.EncKey)
@@ -287,15 +286,26 @@ func (p *StoreCredentialProvider) maybeRefreshOAuth(ctx context.Context, vaultID
 			clientSecret = string(cs)
 		}
 
-		tok, err := oauth.Refresh(ctx, oauth.RefreshConfig{
+		cfg := oauth.RefreshConfig{
 			TokenURL:        oauthCfg.TokenURL,
 			ClientID:        oauthCfg.ClientID,
 			ClientSecret:    clientSecret,
-			RefreshToken:    string(refreshToken),
 			Scopes:          oauthCfg.Scopes,
 			ScopeSeparator:  oauthCfg.ScopeSeparator,
 			TokenAuthMethod: oauthCfg.TokenAuthMethod,
-		})
+		}
+		var tok *oauth.TokenResponse
+		var err error
+		if oauthCfg.GrantType == oauth.ClientCredentialsGrant {
+			tok, err = oauth.ClientCredentials(ctx, cfg)
+		} else {
+			refreshToken, decryptErr := crypto.Decrypt(oauthCfg.RefreshTokenCT, oauthCfg.RefreshTokenNonce, p.EncKey)
+			if decryptErr != nil {
+				return oauth.RefreshResult{Err: fmt.Errorf("%w: decrypt refresh token: %v", ErrOAuthRefreshFailed, decryptErr)}
+			}
+			cfg.RefreshToken = string(refreshToken)
+			tok, err = oauth.Refresh(ctx, cfg)
+		}
 		if err != nil {
 			_ = p.OAuthStore.UpdateCredentialOAuthError(ctx, vaultID, key, err.Error())
 			return oauth.RefreshResult{Err: fmt.Errorf("%w: %v", ErrOAuthRefreshFailed, err)}
@@ -319,7 +329,7 @@ func (p *StoreCredentialProvider) maybeRefreshOAuth(ctx context.Context, vaultID
 			expiresAt = &tok.ExpiresAt
 		}
 
-		if err := p.OAuthStore.UpdateCredentialOAuthTokens(ctx, vaultID, key, accessCT, accessNonce, newRefreshCT, newRefreshNonce, expiresAt); err != nil {
+		if err := p.OAuthStore.UpdateCredentialOAuthTokens(ctx, vaultID, key, accessCT, accessNonce, newRefreshCT, newRefreshNonce, expiresAt, oauthCfg.AccessNonce); err != nil {
 			return oauth.RefreshResult{Err: fmt.Errorf("%w: store tokens: %v", ErrOAuthRefreshFailed, err)}
 		}
 

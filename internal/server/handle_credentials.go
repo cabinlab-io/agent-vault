@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -88,6 +89,7 @@ type credentialEntry struct {
 	LastRefreshedAt  *string `json:"last_refreshed_at,omitempty"`
 	LastRefreshError *string `json:"last_refresh_error,omitempty"`
 	// OAuth config (non-secret fields for edit form pre-fill)
+	GrantType        string  `json:"grant_type,omitempty"`
 	AuthorizationURL *string `json:"authorization_url,omitempty"`
 	TokenURL         *string `json:"token_url,omitempty"`
 	ClientID         *string `json:"client_id,omitempty"`
@@ -148,18 +150,12 @@ func (s *Server) handleCredentialsList(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		entry := credentialEntry{Key: cred.Key, Type: cred.Type}
-		if cred.Type == "oauth" && len(cred.Ciphertext) == 0 {
-			entry.Value = ""
-		} else {
-			plaintext, err := crypto.Decrypt(cred.Ciphertext, cred.Nonce, s.encKey)
-			if err != nil {
-				jsonError(w, http.StatusInternalServerError, "Failed to decrypt credential")
-				return
-			}
-			entry.Value = string(plaintext)
-		}
 		if cred.Type == "oauth" {
-			s.enrichOAuthEntry(ctx, ns.ID, &entry)
+			s.enrichOAuthEntry(ctx, ns.ID, &entry, cred.Nonce)
+		}
+		if err := s.revealCredentialValue(cred, &entry); err != nil {
+			jsonError(w, http.StatusInternalServerError, "Failed to decrypt credential")
+			return
 		}
 		jsonOK(w, credentialsListResponse{
 			Keys:        []string{cred.Key},
@@ -181,21 +177,14 @@ func (s *Server) handleCredentialsList(w http.ResponseWriter, r *http.Request) {
 		keys[i] = cred.Key
 		entries[i] = credentialEntry{Key: cred.Key, Type: cred.Type}
 
-		if reveal {
-			if cred.Type == "oauth" && len(cred.Ciphertext) == 0 {
-				entries[i].Value = ""
-			} else {
-				plaintext, err := crypto.Decrypt(cred.Ciphertext, cred.Nonce, s.encKey)
-				if err != nil {
-					jsonError(w, http.StatusInternalServerError, "Failed to decrypt credential")
-					return
-				}
-				entries[i].Value = string(plaintext)
-			}
-		}
-
 		if cred.Type == "oauth" && isMember {
-			s.enrichOAuthEntry(ctx, ns.ID, &entries[i])
+			s.enrichOAuthEntry(ctx, ns.ID, &entries[i], cred.Nonce)
+		}
+		if reveal {
+			if err := s.revealCredentialValue(&cred, &entries[i]); err != nil {
+				jsonError(w, http.StatusInternalServerError, "Failed to decrypt credential")
+				return
+			}
 		}
 	}
 
@@ -259,11 +248,25 @@ func (s *Server) revealDynamicCredential(ctx context.Context, vaultID, key strin
 	return credentialEntry{Key: key, Type: credentialTypeDynamic, Value: val}, true
 }
 
-func (s *Server) enrichOAuthEntry(ctx context.Context, vaultID string, entry *credentialEntry) {
+// Only legacy OAuth grants support revealing an access token. Missing
+// metadata leaves the value redacted as well.
+func (s *Server) revealCredentialValue(cred *store.Credential, entry *credentialEntry) error {
+	if cred.Type == "oauth" && (entry.GrantType != "authorization_code" || len(cred.Ciphertext) == 0) {
+		return nil
+	}
+	plaintext, err := crypto.Decrypt(cred.Ciphertext, cred.Nonce, s.encKey)
+	if err == nil {
+		entry.Value = string(plaintext)
+	}
+	return err
+}
+
+func (s *Server) enrichOAuthEntry(ctx context.Context, vaultID string, entry *credentialEntry, nonce []byte) {
 	co, err := s.store.GetCredentialOAuth(ctx, vaultID, entry.Key)
-	if err != nil || co == nil {
+	if err != nil || co == nil || !bytes.Equal(nonce, co.AccessNonce) {
 		return
 	}
+	entry.GrantType = co.GrantType
 	if co.ConnectedAt != nil {
 		t := co.ConnectedAt.Format(time.RFC3339)
 		entry.ConnectedAt = &t

@@ -50,6 +50,8 @@ type Credential struct {
 // an OAuth-type credential. The access token lives in credentials.ciphertext;
 // this table stores everything needed to refresh it.
 type CredentialOAuth struct {
+	AccessNonce        []byte // Snapshot of the bearer version read with its expiry.
+	GrantType          string
 	VaultID            string
 	CredentialKey      string
 	AuthorizationURL   string // empty = token upload mode
@@ -464,8 +466,8 @@ type Store interface {
 
 	// OAuth credentials
 	GetCredentialOAuth(ctx context.Context, vaultID, key string) (*CredentialOAuth, error)
-	SetCredentialOAuth(ctx context.Context, oauth *CredentialOAuth) error
-	UpdateCredentialOAuthTokens(ctx context.Context, vaultID, key string, accessCT, accessNonce, refreshCT, refreshNonce []byte, expiresAt *time.Time) error
+	SetCredentialOAuth(ctx context.Context, oauth *CredentialOAuth, initialToken *EncryptedKV) error
+	UpdateCredentialOAuthTokens(ctx context.Context, vaultID, key string, accessCT, accessNonce, refreshCT, refreshNonce []byte, expiresAt *time.Time, expectedNonce []byte) error
 	UpdateCredentialOAuthError(ctx context.Context, vaultID, key string, errMsg string) error
 
 	// OAuth states (CSRF + PKCE for consent flow)

@@ -235,8 +235,8 @@ func (a credentialStoreAdapter) GetCredentialOAuth(ctx context.Context, vaultID,
 	return a.Store.GetCredentialOAuth(ctx, vaultID, key)
 }
 
-func (a credentialStoreAdapter) UpdateCredentialOAuthTokens(ctx context.Context, vaultID, key string, accessCT, accessNonce, refreshCT, refreshNonce []byte, expiresAt *time.Time) error {
-	return a.Store.UpdateCredentialOAuthTokens(ctx, vaultID, key, accessCT, accessNonce, refreshCT, refreshNonce, expiresAt)
+func (a credentialStoreAdapter) UpdateCredentialOAuthTokens(ctx context.Context, vaultID, key string, accessCT, accessNonce, refreshCT, refreshNonce []byte, expiresAt *time.Time, expectedNonce []byte) error {
+	return a.Store.UpdateCredentialOAuthTokens(ctx, vaultID, key, accessCT, accessNonce, refreshCT, refreshNonce, expiresAt, expectedNonce)
 }
 
 func (a credentialStoreAdapter) UpdateCredentialOAuthError(ctx context.Context, vaultID, key, errMsg string) error {
@@ -304,8 +304,8 @@ type Store interface {
 
 	// OAuth credentials
 	GetCredentialOAuth(ctx context.Context, vaultID, key string) (*store.CredentialOAuth, error)
-	SetCredentialOAuth(ctx context.Context, oauth *store.CredentialOAuth) error
-	UpdateCredentialOAuthTokens(ctx context.Context, vaultID, key string, accessCT, accessNonce, refreshCT, refreshNonce []byte, expiresAt *time.Time) error
+	SetCredentialOAuth(ctx context.Context, oauth *store.CredentialOAuth, initialToken *store.EncryptedKV) error
+	UpdateCredentialOAuthTokens(ctx context.Context, vaultID, key string, accessCT, accessNonce, refreshCT, refreshNonce []byte, expiresAt *time.Time, expectedNonce []byte) error
 	UpdateCredentialOAuthError(ctx context.Context, vaultID, key string, errMsg string) error
 
 	// OAuth states (CSRF + PKCE for consent flow)

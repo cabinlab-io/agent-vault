@@ -1271,10 +1271,10 @@ func (m *mockStore) ListDynamicSecretLeases(_ context.Context) ([]store.DynamicS
 func (m *mockStore) GetCredentialOAuth(_ context.Context, _, _ string) (*store.CredentialOAuth, error) {
 	return nil, nil
 }
-func (m *mockStore) SetCredentialOAuth(_ context.Context, _ *store.CredentialOAuth) error {
+func (m *mockStore) SetCredentialOAuth(_ context.Context, _ *store.CredentialOAuth, _ *store.EncryptedKV) error {
 	return nil
 }
-func (m *mockStore) UpdateCredentialOAuthTokens(_ context.Context, _, _ string, _, _, _, _ []byte, _ *time.Time) error {
+func (m *mockStore) UpdateCredentialOAuthTokens(_ context.Context, _, _ string, _, _, _, _ []byte, _ *time.Time, _ []byte) error {
 	return nil
 }
 func (m *mockStore) UpdateCredentialOAuthError(_ context.Context, _, _, _ string) error {

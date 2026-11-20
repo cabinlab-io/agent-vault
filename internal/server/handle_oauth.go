@@ -24,6 +24,7 @@ const oauthStateTTL = 10 * time.Minute
 const oauthSecretSentinel = "••••••••"
 
 type oauthConnectRequest struct {
+	GrantType        string `json:"grant_type,omitempty"`
 	Vault            string `json:"vault"`
 	Key              string `json:"key"`
 	AuthorizationURL string `json:"authorization_url"`
@@ -53,7 +54,16 @@ func (s *Server) handleOAuthConnect(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusBadRequest, fmt.Sprintf("Invalid credential key %q: must be SCREAMING_SNAKE_CASE (e.g. GITHUB_TOKEN)", req.Key))
 		return
 	}
-	if req.AuthorizationURL == "" {
+	machine := req.GrantType == oauth.ClientCredentialsGrant
+	if !machine && req.GrantType != "" && req.GrantType != "authorization_code" {
+		jsonError(w, http.StatusBadRequest, "Unsupported OAuth grant_type")
+		return
+	}
+	if machine && (req.ClientSecret == "" || req.ClientSecret == oauthSecretSentinel) {
+		jsonError(w, http.StatusBadRequest, "client_credentials requires a client_secret")
+		return
+	}
+	if !machine && req.AuthorizationURL == "" {
 		jsonError(w, http.StatusBadRequest, "\"authorization_url\" is required for the connect flow")
 		return
 	}
@@ -61,7 +71,7 @@ func (s *Server) handleOAuthConnect(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusBadRequest, "\"token_url\" is required")
 		return
 	}
-	if !isValidHTTPURL(req.AuthorizationURL) {
+	if !machine && !isValidHTTPURL(req.AuthorizationURL) {
 		jsonError(w, http.StatusBadRequest, "\"authorization_url\" must be an https:// or http:// URL")
 		return
 	}
@@ -96,7 +106,7 @@ func (s *Server) handleOAuthConnect(w http.ResponseWriter, r *http.Request) {
 	var clientSecretCT, clientSecretNonce []byte
 	if req.ClientSecret == oauthSecretSentinel {
 		existing, _ := s.store.GetCredentialOAuth(ctx, ns.ID, req.Key)
-		if existing != nil && existing.TokenURL == req.TokenURL {
+		if existing != nil && existing.GrantType != oauth.ClientCredentialsGrant && existing.TokenURL == req.TokenURL {
 			clientSecretCT = existing.ClientSecretCT
 			clientSecretNonce = existing.ClientSecretNonce
 		}
@@ -117,20 +127,47 @@ func (s *Server) handleOAuthConnect(w http.ResponseWriter, r *http.Request) {
 		tokenAuthMethod = "client_secret_post"
 	}
 
-	if err := s.store.SetCredentialOAuth(ctx, &store.CredentialOAuth{
-		VaultID:          ns.ID,
-		CredentialKey:    req.Key,
-		AuthorizationURL: req.AuthorizationURL,
-		TokenURL:         req.TokenURL,
-		ClientID:         req.ClientID,
-		ClientSecretCT:   clientSecretCT,
+	cfg := &store.CredentialOAuth{
+		GrantType:         req.GrantType,
+		VaultID:           ns.ID,
+		CredentialKey:     req.Key,
+		AuthorizationURL:  req.AuthorizationURL,
+		TokenURL:          req.TokenURL,
+		ClientID:          req.ClientID,
+		ClientSecretCT:    clientSecretCT,
 		ClientSecretNonce: clientSecretNonce,
-		Scopes:           req.Scopes,
-		ScopeSeparator:   scopeSep,
-		DisablePKCE:      req.DisablePKCE,
-		TokenAuthMethod:  tokenAuthMethod,
-	}); err != nil {
+		Scopes:            req.Scopes,
+		ScopeSeparator:    scopeSep,
+		DisablePKCE:       req.DisablePKCE,
+		TokenAuthMethod:   tokenAuthMethod,
+	}
+	var initialToken *store.EncryptedKV
+	if machine {
+		tok, err := oauth.ClientCredentials(ctx, oauth.RefreshConfig{
+			TokenURL: req.TokenURL, ClientID: req.ClientID, ClientSecret: req.ClientSecret,
+			Scopes: req.Scopes, ScopeSeparator: scopeSep, TokenAuthMethod: tokenAuthMethod,
+		})
+		if err != nil {
+			jsonError(w, http.StatusBadGateway, "Client credentials exchange failed")
+			return
+		}
+		ct, nonce, err := crypto.Encrypt([]byte(tok.AccessToken), s.encKey)
+		if err != nil {
+			jsonError(w, http.StatusInternalServerError, "Encryption failed")
+			return
+		}
+		now := time.Now().UTC()
+		cfg.ConnectedAt = &now
+		cfg.TokenExpiresAt = &tok.ExpiresAt
+		initialToken = &store.EncryptedKV{Key: req.Key, Ciphertext: ct, Nonce: nonce}
+	}
+	if err := s.store.SetCredentialOAuth(ctx, cfg, initialToken); err != nil {
 		jsonError(w, http.StatusInternalServerError, "Failed to save OAuth configuration")
+		return
+	}
+
+	if machine {
+		jsonOK(w, map[string]bool{"connected": true})
 		return
 	}
 
@@ -204,7 +241,7 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 
 	// Load OAuth config for token exchange.
 	oauthCfg, err := s.store.GetCredentialOAuth(ctx, st.VaultID, st.CredentialKey)
-	if err != nil {
+	if err != nil || oauthCfg.GrantType == oauth.ClientCredentialsGrant {
 		s.redirectOAuthComplete(w, r, "", "", "error", "OAuth configuration not found")
 		return
 	}
@@ -254,7 +291,7 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 		expiresAt = &tok.ExpiresAt
 	}
 
-	if err := s.store.UpdateCredentialOAuthTokens(ctx, st.VaultID, st.CredentialKey, accessCT, accessNonce, refreshCT, refreshNonce, expiresAt); err != nil {
+	if err := s.store.UpdateCredentialOAuthTokens(ctx, st.VaultID, st.CredentialKey, accessCT, accessNonce, refreshCT, refreshNonce, expiresAt, nil); err != nil {
 		s.redirectOAuthComplete(w, r, "", "", "error", "Failed to store tokens")
 		return
 	}
@@ -365,6 +402,10 @@ func (s *Server) handleOAuthTokenUpload(w http.ResponseWriter, r *http.Request) 
 
 	// Resolve OAuth config: use request fields, fall back to existing config.
 	existing, _ := s.store.GetCredentialOAuth(ctx, ns.ID, req.Key)
+	if existing != nil && existing.GrantType == oauth.ClientCredentialsGrant {
+		jsonError(w, http.StatusBadRequest, "Use the connect endpoint for client_credentials")
+		return
+	}
 	tokenURL := req.TokenURL
 	clientID := req.ClientID
 	clientSecret := req.ClientSecret
@@ -458,13 +499,13 @@ func (s *Server) handleOAuthTokenUpload(w http.ResponseWriter, r *http.Request) 
 			oauthRow.ScopeSeparator = existing.ScopeSeparator
 			oauthRow.DisablePKCE = existing.DisablePKCE
 		}
-		_ = s.store.SetCredentialOAuth(ctx, oauthRow)
+		_ = s.store.SetCredentialOAuth(ctx, oauthRow, nil)
 
 		var expiresAt *time.Time
 		if !tok.ExpiresAt.IsZero() {
 			expiresAt = &tok.ExpiresAt
 		}
-		if err := s.store.UpdateCredentialOAuthTokens(ctx, ns.ID, req.Key, accessCT, accessNonce, refreshCT, refreshNonce, expiresAt); err != nil {
+		if err := s.store.UpdateCredentialOAuthTokens(ctx, ns.ID, req.Key, accessCT, accessNonce, refreshCT, refreshNonce, expiresAt, nil); err != nil {
 			jsonError(w, http.StatusInternalServerError, "Failed to store tokens")
 			return
 		}
@@ -522,7 +563,7 @@ func (s *Server) handleOAuthTokenUpload(w http.ResponseWriter, r *http.Request) 
 			CredentialKey: req.Key,
 			TokenURL:      tokenURL,
 			ClientID:      clientID,
-		})
+		}, nil)
 	}
 
 	// Preserve existing token_expires_at when not uploading a new refresh token.
@@ -530,7 +571,7 @@ func (s *Server) handleOAuthTokenUpload(w http.ResponseWriter, r *http.Request) 
 	if existing != nil {
 		existingExpiresAt = existing.TokenExpiresAt
 	}
-	if err := s.store.UpdateCredentialOAuthTokens(ctx, ns.ID, req.Key, accessCT, accessNonce, refreshCT, refreshNonce, existingExpiresAt); err != nil {
+	if err := s.store.UpdateCredentialOAuthTokens(ctx, ns.ID, req.Key, accessCT, accessNonce, refreshCT, refreshNonce, existingExpiresAt, nil); err != nil {
 		jsonError(w, http.StatusInternalServerError, "Failed to store tokens")
 		return
 	}
@@ -552,7 +593,6 @@ func (s *Server) redirectOAuthComplete(w http.ResponseWriter, r *http.Request, v
 	}
 	http.Redirect(w, r, u, http.StatusFound)
 }
-
 
 func isValidHTTPURL(raw string) bool {
 	u, err := url.Parse(raw)

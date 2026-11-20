@@ -95,8 +95,10 @@ func Exchange(ctx context.Context, cfg ExchangeConfig) (*TokenResponse, error) {
 		req.SetBasicAuth(cfg.ClientID, cfg.ClientSecret)
 	}
 
-	return doTokenRequest(req)
+	return doTokenRequest(TokenClient, req)
 }
+
+const ClientCredentialsGrant = "client_credentials"
 
 // Refresh performs a refresh_token grant per RFC 6749 §6.
 func Refresh(ctx context.Context, cfg RefreshConfig) (*TokenResponse, error) {
@@ -105,6 +107,26 @@ func Refresh(ctx context.Context, cfg RefreshConfig) (*TokenResponse, error) {
 		"refresh_token": {cfg.RefreshToken},
 	}
 
+	return requestGrant(ctx, cfg, form)
+}
+
+// ClientCredentials obtains a fresh expiring bearer without a refresh token.
+func ClientCredentials(ctx context.Context, cfg RefreshConfig) (*TokenResponse, error) {
+	tok, err := requestGrant(ctx, cfg, url.Values{"grant_type": {ClientCredentialsGrant}})
+	if err != nil {
+		if endpoint, ok := err.(*TokenError); ok {
+			return nil, fmt.Errorf("oauth: token endpoint returned %d", endpoint.StatusCode)
+		}
+		return nil, err
+	}
+	if tok.AccessToken == "" || !tok.ExpiresAt.After(time.Now()) {
+		return nil, fmt.Errorf("oauth: client credentials response requires access_token and positive expires_in")
+	}
+	tok.RefreshToken = ""
+	return tok, nil
+}
+
+func requestGrant(ctx context.Context, cfg RefreshConfig, form url.Values) (*TokenResponse, error) {
 	if cfg.Scopes != "" {
 		sep := cfg.ScopeSeparator
 		if sep == "" {
@@ -133,7 +155,17 @@ func Refresh(ctx context.Context, cfg RefreshConfig) (*TokenResponse, error) {
 		req.SetBasicAuth(cfg.ClientID, cfg.ClientSecret)
 	}
 
-	return doTokenRequest(req)
+	client := TokenClient
+	if form.Get("grant_type") == ClientCredentialsGrant {
+		if req.URL.Scheme != "https" {
+			return nil, fmt.Errorf("oauth: client credentials require an HTTPS token endpoint")
+		}
+		// Never forward the client secret to a redirect target.
+		direct := *client
+		direct.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+		client = &direct
+	}
+	return doTokenRequest(client, req)
 }
 
 // applyClientAuth adds client credentials to the form body when using
@@ -162,8 +194,8 @@ var defaultTokenClient = func() *http.Client {
 // Override this at init time to inject network guards (e.g., SSRF protection).
 var TokenClient = defaultTokenClient
 
-func doTokenRequest(req *http.Request) (*TokenResponse, error) {
-	resp, err := TokenClient.Do(req)
+func doTokenRequest(client *http.Client, req *http.Request) (*TokenResponse, error) {
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("oauth: sending token request: %w", err)
 	}

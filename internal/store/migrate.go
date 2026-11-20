@@ -540,7 +540,7 @@ func copyCredentialOAuth(ctx context.Context, src *SQLStore, tx *sql.Tx, dstDial
 	rows, err := src.db.QueryContext(ctx,
 		`SELECT vault_id, credential_key, authorization_url, token_url, client_id,
 		        client_secret_ct, client_secret_nonce, scopes, scope_separator,
-		        disable_pkce, token_auth_method,
+		        disable_pkce, token_auth_method, grant_type,
 		        refresh_token_ct, refresh_token_nonce,
 		        token_expires_at, connected_at, last_refreshed_at,
 		        last_refresh_error, last_refresh_error_at,
@@ -553,7 +553,7 @@ func copyCredentialOAuth(ctx context.Context, src *SQLStore, tx *sql.Tx, dstDial
 
 	n := 0
 	for rows.Next() {
-		var vaultID, credKey string
+		var vaultID, credKey, grantType string
 		var authURL, tokenURL, clientID interface{}
 		var clientSecretCT, clientSecretNonce []byte
 		var scopes, scopeSep, tokenAuthMethod interface{}
@@ -567,7 +567,7 @@ func copyCredentialOAuth(ctx context.Context, src *SQLStore, tx *sql.Tx, dstDial
 		if err := rows.Scan(
 			&vaultID, &credKey, &authURL, &tokenURL, &clientID,
 			&clientSecretCT, &clientSecretNonce, &scopes, &scopeSep,
-			&disablePkce, &tokenAuthMethod,
+			&disablePkce, &tokenAuthMethod, &grantType,
 			&refreshCT, &refreshNonce,
 			&tokenExpiresAt, &connectedAt, &lastRefreshedAt,
 			&lastRefreshError, &lastRefreshErrorAt,
@@ -609,15 +609,15 @@ func copyCredentialOAuth(ctx context.Context, src *SQLStore, tx *sql.Tx, dstDial
 			dstDialect.Rebind(`INSERT INTO credential_oauth
 				(vault_id, credential_key, authorization_url, token_url, client_id,
 				 client_secret_ct, client_secret_nonce, scopes, scope_separator,
-				 disable_pkce, token_auth_method,
+				 disable_pkce, token_auth_method, grant_type,
 				 refresh_token_ct, refresh_token_nonce,
 				 token_expires_at, connected_at, last_refreshed_at,
 				 last_refresh_error, last_refresh_error_at,
 				 created_at, updated_at)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
 			vaultID, credKey, authURL, tokenURL, clientID,
 			clientSecretCT, clientSecretNonce, scopes, scopeSep,
-			boolVal, tokenAuthMethod,
+			boolVal, tokenAuthMethod, grantType,
 			refreshCT, refreshNonce,
 			tea, conna, lra,
 			lastRefreshError, lrea,
