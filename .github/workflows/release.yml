@@ -1,9 +1,23 @@
 name: Release
 
+# Publishes the fork's release: binaries on the GitHub release and
+# multi-arch images at ghcr.io/cabinlab-io/agent-vault. Start it by pushing
+# a v* tag, or with "Run workflow" and a version, which tags the chosen
+# commit first.
 on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Tag to create and release, e.g. v0.40.3-cabin.1"
+        required: true
+        type: string
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 # Minimal permissions — only grant what's needed.
 permissions:
@@ -24,6 +38,26 @@ jobs:
           fetch-depth: 0  # GoReleaser needs full history for changelog
           persist-credentials: false
 
+      # Manual runs: create the tag on GitHub (a tag made with GITHUB_TOKEN
+      # starts no second run) and locally, where GoReleaser reads it.
+      - name: Create tag for a manual run
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::version must look like v1.2.3 or v1.2.3-cabin.1, got '$VERSION'"
+            exit 1
+          fi
+          if git rev-parse -q --verify "refs/tags/$VERSION" >/dev/null; then
+            echo "::error::tag $VERSION already exists"
+            exit 1
+          fi
+          gh api "repos/${GITHUB_REPOSITORY}/git/refs" \
+            -f ref="refs/tags/$VERSION" -f sha="$GITHUB_SHA" >/dev/null
+          git tag "$VERSION" "$GITHUB_SHA"
+
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
@@ -40,11 +74,12 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
-      - name: Log in to Docker Hub
+      - name: Log in to GitHub Container Registry
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
@@ -59,8 +94,6 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          HOMEBREW_TAP_TOKEN: ${{ secrets.GO_RELEASER_GITHUB_TOKEN }}
-          POSTHOG_API_KEY: ${{ secrets.POSTHOG_API_KEY }}
 
       - name: Generate build provenance attestations
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
