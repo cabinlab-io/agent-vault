@@ -123,12 +123,12 @@ release:
     # Verify signature (requires cosign v2+)
     cosign verify-blob \
       --bundle checksums.txt.sig \
-      --certificate-identity-regexp "^https://github\.com/cabinlab-io/agent-vault/\.github/workflows/release\.yml@refs/" \
+      --certificate-identity-regexp "^https://github\.com/cabinlab-io/agent-vault/\.github/workflows/release\.yml@refs/(heads/main|tags/v.+)$" \
       --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
       checksums.txt
 
     # Verify Docker image signature (requires cosign)
     cosign verify ghcr.io/cabinlab-io/agent-vault:{{ .Version }} \
-      --certificate-identity-regexp "^https://github\.com/cabinlab-io/agent-vault/\.github/workflows/release\.yml@refs/" \
+      --certificate-identity-regexp "^https://github\.com/cabinlab-io/agent-vault/\.github/workflows/release\.yml@refs/(heads/main|tags/v.+)$" \
       --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
     ```
