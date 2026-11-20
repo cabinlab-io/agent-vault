@@ -173,37 +173,15 @@ func (p *StoreCredentialProvider) Inject(ctx context.Context, vaultID, targetHos
 		if v, ok := cache[key]; ok {
 			return v, nil
 		}
-		cred, err := p.Store.GetCredential(ctx, vaultID, key)
-		if err != nil || cred == nil {
-			// No static credential: try resolving it as a dynamic-secret field.
-			if p.Dynamic != nil {
-				if val, ok, derr := p.Dynamic.Resolve(ctx, vaultID, key); derr != nil {
-					return "", derr
-				} else if ok {
-					cache[key] = val
-					return val, nil
-				}
-			}
-			return "", fmt.Errorf("credential %q not found", key)
+		s, err := p.lookupCredential(ctx, vaultID, key)
+		if errors.Is(err, errOAuthTokenChanged) {
+			// A concurrent exchange replaced the bearer between our two
+			// reads. Read again to pick up the new token.
+			s, err = p.lookupCredential(ctx, vaultID, key)
 		}
-
-		plaintext, err := crypto.Decrypt(cred.Ciphertext, cred.Nonce, p.EncKey)
 		if err != nil {
-			return "", fmt.Errorf("failed to decrypt credential %q", key)
+			return "", err
 		}
-		s := string(plaintext)
-
-		if cred.Type == "oauth" && s == "" {
-			return "", fmt.Errorf("%w: credential %q", ErrOAuthNotConnected, key)
-		}
-
-		if cred.Type == "oauth" && p.Refresher != nil && p.OAuthStore != nil {
-			s, err = p.maybeRefreshOAuth(ctx, vaultID, key, s, cred.Nonce)
-			if err != nil {
-				return "", err
-			}
-		}
-
 		cache[key] = s
 		return s, nil
 	}
@@ -253,16 +231,63 @@ func (p *StoreCredentialProvider) Inject(ctx context.Context, vaultID, targetHos
 	return result, nil
 }
 
+// errOAuthTokenChanged reports that a client-credentials bearer was replaced
+// between reading the credential and reading its OAuth configuration.
+var errOAuthTokenChanged = fmt.Errorf("%w: OAuth token changed during read", ErrOAuthRefreshFailed)
+
+// lookupCredential resolves one credential key to its injectable value:
+// a static or OAuth credential (refreshing the OAuth token if needed), or
+// a dynamic-secret field when no stored credential exists.
+func (p *StoreCredentialProvider) lookupCredential(ctx context.Context, vaultID, key string) (string, error) {
+	cred, err := p.Store.GetCredential(ctx, vaultID, key)
+	if err != nil || cred == nil {
+		// No static credential: try resolving it as a dynamic-secret field.
+		if p.Dynamic != nil {
+			if val, ok, derr := p.Dynamic.Resolve(ctx, vaultID, key); derr != nil {
+				return "", derr
+			} else if ok {
+				return val, nil
+			}
+		}
+		return "", fmt.Errorf("credential %q not found", key)
+	}
+
+	plaintext, err := crypto.Decrypt(cred.Ciphertext, cred.Nonce, p.EncKey)
+	if err != nil {
+		return "", fmt.Errorf("failed to decrypt credential %q", key)
+	}
+	s := string(plaintext)
+
+	if cred.Type == "oauth" && s == "" {
+		return "", fmt.Errorf("%w: credential %q", ErrOAuthNotConnected, key)
+	}
+
+	if cred.Type == "oauth" && p.Refresher != nil && p.OAuthStore != nil {
+		return p.maybeRefreshOAuth(ctx, vaultID, key, s, cred.Nonce)
+	}
+	return s, nil
+}
+
 const oauthRefreshBuffer = 5 * time.Minute
 
 func (p *StoreCredentialProvider) maybeRefreshOAuth(ctx context.Context, vaultID, key, currentToken string, currentNonce []byte) (string, error) {
 	oauthCfg, err := p.OAuthStore.GetCredentialOAuth(ctx, vaultID, key)
+	if errors.Is(err, sql.ErrNoRows) {
+		// No refresh configuration (e.g. a pasted token without one):
+		// serve the stored token as before.
+		return currentToken, nil
+	}
 	if err != nil {
 		return "", fmt.Errorf("%w: load OAuth configuration: %v", ErrOAuthRefreshFailed, err)
 	}
 
-	if oauthCfg.GrantType == oauth.ClientCredentialsGrant && (!bytes.Equal(currentNonce, oauthCfg.AccessNonce) || oauthCfg.TokenExpiresAt == nil) {
-		return "", fmt.Errorf("%w: missing or changed OAuth token expiry", ErrOAuthRefreshFailed)
+	if oauthCfg.GrantType == oauth.ClientCredentialsGrant {
+		if !bytes.Equal(currentNonce, oauthCfg.AccessNonce) {
+			return "", errOAuthTokenChanged
+		}
+		if oauthCfg.TokenExpiresAt == nil {
+			return "", fmt.Errorf("%w: missing OAuth token expiry", ErrOAuthRefreshFailed)
+		}
 	}
 	if oauthCfg.TokenExpiresAt == nil {
 		return currentToken, nil

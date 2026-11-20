@@ -31,12 +31,13 @@ func TestClientCredentialsLifecycle(t *testing.T) {
 	var requests atomic.Int32
 	var reject atomic.Bool
 	endpoint := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 		if r.Method != "POST" || r.FormValue("grant_type") != "client_credentials" || r.FormValue("client_id") != "client" || r.FormValue("client_secret") != "test-secret" || r.FormValue("scope") != "auth_keys" || r.Form.Has("refresh_token") {
 			t.Error("unexpected token request")
 		}
 		n := requests.Add(1)
 		if reject.Load() {
-			http.Error(w, "test-secret", 401)
+			http.Error(w, "test-secret", http.StatusUnauthorized)
 			return
 		}
 		fmt.Fprintf(w, `{"access_token":"fixture-%d","expires_in":3600}`, n)
@@ -123,6 +124,7 @@ func TestDefaultOAuthGrantUsesRefreshToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 		if r.FormValue("grant_type") != "refresh_token" || r.FormValue("refresh_token") != "fixture-refresh" {
 			t.Error("incorrect refresh request")
 		}
@@ -163,5 +165,67 @@ func TestDefaultOAuthGrantUsesRefreshToken(t *testing.T) {
 	got, err := provider.Inject(ctx, vault.ID, "resource.example", 443, "/")
 	if err != nil || got.Headers["Authorization"] != "Bearer renewed" {
 		t.Fatalf("legacy refresh failed: %v", err)
+	}
+}
+
+// swapOnFirstOAuthRead replaces the stored bearer just before the first OAuth
+// configuration read, as a concurrent exchange committing between the
+// broker's two reads would.
+type swapOnFirstOAuthRead struct {
+	*store.SQLStore
+	swap func()
+	done atomic.Bool
+}
+
+func (s *swapOnFirstOAuthRead) GetCredentialOAuth(ctx context.Context, vaultID, key string) (*store.CredentialOAuth, error) {
+	if s.done.CompareAndSwap(false, true) {
+		s.swap()
+	}
+	return s.SQLStore.GetCredentialOAuth(ctx, vaultID, key)
+}
+
+func TestClientCredentialsRereadsReplacedToken(t *testing.T) {
+	ctx := t.Context()
+	db, err := store.Open(filepath.Join(t.TempDir(), "swap.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	vault, err := db.CreateVault(ctx, "enrollment")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := newTestServer(withStore(db))
+	future := time.Now().Add(time.Hour)
+	first, firstNonce, err := crypto.Encrypt([]byte("first"), srv.encKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &store.CredentialOAuth{
+		GrantType: oauth.ClientCredentialsGrant, VaultID: vault.ID, CredentialKey: "TS",
+		TokenURL: "https://token.invalid/oauth/token", ClientID: "client", TokenExpiresAt: &future,
+	}
+	if err := db.SetCredentialOAuth(ctx, cfg, &store.EncryptedKV{Key: "TS", Ciphertext: first, Nonce: firstNonce}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SetBrokerConfig(ctx, vault.ID, `[{"name":"api","host":"resource.example","auth":{"type":"bearer","token":"TS"}}]`); err != nil {
+		t.Fatal(err)
+	}
+	wrapped := &swapOnFirstOAuthRead{SQLStore: db, swap: func() {
+		second, secondNonce, err := crypto.Encrypt([]byte("second"), srv.encKey)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		if err := db.UpdateCredentialOAuthTokens(ctx, vault.ID, "TS", second, secondNonce, nil, nil, &future, firstNonce); err != nil {
+			t.Error(err)
+		}
+	}}
+	provider := brokercore.NewStoreCredentialProvider(credentialStoreAdapter{db}, srv.encKey)
+	provider.OAuthStore = wrapped
+	provider.Refresher = oauth.NewRefresher()
+	got, err := provider.Inject(ctx, vault.ID, "resource.example", 443, "/")
+	if err != nil || got.Headers["Authorization"] != "Bearer second" {
+		t.Fatalf("replaced token not reread: %v", err)
 	}
 }
